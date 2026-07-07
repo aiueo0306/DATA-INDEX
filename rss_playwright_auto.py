@@ -1,81 +1,120 @@
-from feedgen.feed import FeedGenerator
-from datetime import datetime, timezone
 import os
+import sys
+import subprocess
+import tempfile
+import re
+import time
+import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-def generate_rss(items, output_path):
-    fg = FeedGenerator()
-    fg.title("DSJP｜医療用医薬品供給状況データベース")
-    fg.link(href="https://drugshortage.jp/updatehistory.php")
-    fg.description("DrugShortage.jpの更新履歴")
-    fg.language("ja")
+# ===== GitHub 上の共通関数を一時ディレクトリにクローン =====
+REPO_URL = "https://github.com/aiueo0306/shared-python-env.git"
+SHARED_DIR = os.path.join(tempfile.gettempdir(), "shared-python-env")
 
-    for item in items:
-        entry = fg.add_entry()
-        entry.title(item['title'])
-        entry.link(href=item['link'])
-        entry.description(item['description'])
-        entry.guid(item['link'], permalink=False)
-        entry.pubDate(datetime.now(timezone.utc))  # ← タイムゾーン付きで修正済み
+if not os.path.exists(SHARED_DIR):
+    print("🔄 共通関数を初回クローン中...")
+    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, SHARED_DIR], check=True)
+else:
+    print("🔁 共通関数を更新中...")
+    subprocess.run(["git", "-C", SHARED_DIR, "pull"], check=True)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fg.rss_file(output_path)
+sys.path.append(SHARED_DIR)
 
+# ===== 共通関数のインポート =====
+from rss_utils import generate_rss
+from scraper_utils import extract_items
+from browser_utils import click_button_in_order
+from browser_utils import click_button_in_order
+
+# ===== 固定情報（学会サイト） =====
+BASE_URL = "https://www.data-index.co.jp/news/"
+GAKKAI = "データインデックス"
+
+SELECTOR_TITLE = "div.p-news__postarea div.p-news__postarea__item"
+title_selector = ""h2
+title_index = 0
+href_selector = "a"
+href_index = 0
+SELECTOR_DATE = "div.p-news__postarea div.p-news__postarea__post-info"
+date_selector = "time"
+date_index = 0
+year_unit = "."
+month_unit = "."
+day_unit = "."
+date_format = f"%Y{year_unit}%m{month_unit}%d{day_unit}"
+date_regex = rf"(\d{{2,4}}){year_unit}(\d{{1,2}}){month_unit}(\d{{1,2}}){day_unit}"
+
+# ===== ポップアップ順序クリック設定 =====
+POPUP_MODE = 0  # 1: 実行 / 0: スキップ
+POPUP_BUTTONS = [""]  # 正確なボタン表記だけを指定
+WAIT_BETWEEN_POPUPS_MS = 500
+BUTTON_TIMEOUT_MS = 12000
+
+# ===== Playwright 実行ブロック =====
 with sync_playwright() as p:
     print("▶ ブラウザを起動中...")
-    browser = p.chromium.launch(headless=True)  # GUIなしで実行
+    # 無人実行：headless=True のまま（UA/viewport を人間同等にするのも有効）
+    browser = p.chromium.launch(headless=True)
     context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        locale="ja-JP",
+        viewport={"width": 1366, "height": 900},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        extra_http_headers={"Accept-Language": "ja,en;q=0.8"},
     )
     page = context.new_page()
 
     try:
         print("▶ ページにアクセス中...")
-        page.goto("https://drugshortage.jp/updatehistory.php", timeout=30000)
-        page.wait_for_load_state("load", timeout=30000)
-    except PlaywrightTimeoutError:
-        print("⚠ ページの読み込みに失敗しました。Cloudflareにブロックされた可能性があります。")
-        browser.close()
-        exit()
-
-    print("✅ Cloudflare通過後、規約同意をセット中...")
-    page.evaluate("localStorage.setItem('policyAgreement', 'true');")
-    page.reload()
-    page.wait_for_load_state("load", timeout=30000)
-
-    print("▶ 医薬品情報を抽出しています...")
-    containers = page.locator("div.card-body > div > div.flex-grow-1")
-    items = []
-    count = containers.count()
-    print(f"📦 発見した項目数: {count}")
-
-    #import sys
-    #print("終了します")
-    #sys.exit()
-
-    #max_items = 1  # 任意の制限
-    #for i in range(min(count, max_items)):
-    
-    for i in range(count):
-        container = containers.nth(i)
+        page.goto(BASE_URL, timeout=30000)
         try:
-            title = container.locator("div.product-title.ms-2 > a").inner_text().strip()
-            link = container.locator("div.product-title.ms-2 > a").get_attribute("href")
-            description1 = container.locator("div.d-flex.flex-row.align-items-center.gap-2.mb-3 > div.status-display > span").inner_text().strip()
-            description2 = container.locator("div.packaging-unit.small.ms-2").inner_text().strip()
-            description = "       " + description1 + "        " + description2
-            if link and not link.startswith("http"):
-                link = f"https://drugshortage.jp/{link}"
-            items.append({"title": title, "link": link, "description": description})
-        except:
-            continue
+            page.wait_for_load_state("networkidle", timeout=30000)
+        except Exception:
+            page.wait_for_load_state("domcontentloaded")
+        print("🌐 到達URL:", page.url)
+
+        # ---- ポップアップ順に処理 ----
+        if POPUP_MODE == 1 and POPUP_BUTTONS:
+            for i, label in enumerate(POPUP_BUTTONS, start=1):
+                handled = click_button_in_order(page, label, step_idx=i, timeout_ms=BUTTON_TIMEOUT_MS)
+                if handled:
+                    page.wait_for_timeout(WAIT_BETWEEN_POPUPS_MS)
+                else:
+                    break  # 次に進めたい場合は continue に
+        else:
+            print("ℹ ポップアップ処理をスキップ（POPUP_MODE=0）")
+
+        # 本文読み込み
+        page.wait_for_load_state("load", timeout=30000)
+
+    except PlaywrightTimeoutError:
+        print("⚠ ページの読み込みに失敗しました。")
+        browser.close()
+        raise
+
+    print("▶ 記事を抽出しています...")
+    items = extract_items(
+        page,
+        SELECTOR_DATE,
+        SELECTOR_TITLE,
+        title_selector,
+        title_index,
+        href_selector,
+        href_index,
+        BASE_URL,
+        date_selector,
+        date_index,
+        date_format,
+        date_regex,
+    )
 
     if not items:
-        print("⚠ 抽出できた情報がありません。HTML構造変更の可能性があります。")
+        print("⚠ 抽出できた記事がありません。HTML構造が変わっている可能性があります。")
 
-    today = datetime.now().strftime("%Y%m%d")
-    rss_path = f"rss_output/drugshortage.xml"
-    generate_rss(items, rss_path)
-
-    print(f"\n✅ RSSフィード生成完了！\n📄 保存先: {rss_path}")
+    os.makedirs("rss_output", exist_ok=True)
+    rss_path = "rss_output/Feed1.xml"
+    generate_rss(items, rss_path, BASE_URL, GAKKAI)
     browser.close()
