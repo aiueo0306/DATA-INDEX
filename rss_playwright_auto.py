@@ -40,7 +40,7 @@ date_selector = "time"
 date_index = 0
 year_unit = "."
 month_unit = "."
-day_unit = "."
+day_unit = ""
 date_format = f"%Y{year_unit}%m{month_unit}%d{day_unit}"
 date_regex = rf"(\d{{2,4}}){year_unit}(\d{{1,2}}){month_unit}(\d{{1,2}}){day_unit}"
 
