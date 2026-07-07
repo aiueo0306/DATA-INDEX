@@ -31,7 +31,7 @@ BASE_URL = "https://www.data-index.co.jp/news/"
 GAKKAI = "データインデックス"
 
 SELECTOR_TITLE = "div.p-news__postarea div.p-news__postarea__item"
-title_selector = ""h2
+title_selector = "h2"
 title_index = 0
 href_selector = "a"
 href_index = 0
